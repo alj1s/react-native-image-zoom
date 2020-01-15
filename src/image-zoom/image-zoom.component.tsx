@@ -1,16 +1,9 @@
 import * as React from 'react';
-import {
-  Animated,
-  LayoutChangeEvent,
-  PanResponder,
-  PanResponderInstance,
-  Platform,
-  PlatformOSType,
-  StyleSheet,
-  View
-} from 'react-native';
+import { Animated, LayoutChangeEvent, PanResponder, PanResponderInstance, StyleSheet, View } from 'react-native';
 import styles from './image-zoom.style';
 import { ICenterOn, Props, State } from './image-zoom.type';
+
+const DECELERATION = 0.99;
 
 export default class ImageViewer extends React.Component<Props, State> {
   public static defaultProps = new Props();
@@ -32,11 +25,10 @@ export default class ImageViewer extends React.Component<Props, State> {
   private zoomLastDistance: number | null = null;
   private zoomCurrentDistance = 0;
 
+  private listener: string = '';
+
   // 图片手势处理
   private imagePanResponder: PanResponderInstance | null = null;
-
-  // 上次手按下去的时间
-  private lastTouchStartTime: number = 0;
 
   // 滑动过程中，整体横向过界偏移量
   private horizontalWholeOuterCounter = 0;
@@ -87,7 +79,6 @@ export default class ImageViewer extends React.Component<Props, State> {
         this.zoomLastDistance = null;
         this.horizontalWholeCounter = 0;
         this.verticalWholeCounter = 0;
-        this.lastTouchStartTime = new Date().getTime();
         this.isDoubleClick = false;
         this.isLongPress = false;
         this.isHorizontalWrap = false;
@@ -312,26 +303,6 @@ export default class ImageViewer extends React.Component<Props, State> {
             if (this.props.imageHeight * this.scale > this.props.cropHeight) {
               this.positionY += diffY / this.scale;
               this.animatedPositionY.setValue(this.positionY);
-
-              // 如果图片上边缘脱离屏幕上边缘，则进入 swipeDown 动作
-              // if (
-              //   (this.props.imageHeight / 2 - this.positionY) * this.scale <
-              //   this.props.cropHeight / 2
-              // ) {
-              //   if (this.props.enableSwipeDown) {
-              //     this.swipeDownOffset += diffY
-
-              //     // 只要滑动溢出量不小于 0，就可以拖动
-              //     if (this.swipeDownOffset > 0) {
-              //       this.positionY += diffY / this.scale
-              //       this.animatedPositionY.setValue(this.positionY)
-
-              //       // 越到下方，缩放越小
-              //       this.scale = this.scale - diffY / 1000
-              //       this.animatedScale.setValue(this.scale)
-              //     }
-              //   }
-              // }
             } else {
               // swipeDown 不允许在已经有横向偏移量时触发
               if (this.props.enableSwipeDown && !this.isHorizontalWrap) {
@@ -435,7 +406,6 @@ export default class ImageViewer extends React.Component<Props, State> {
         }
 
         // 如果是单个手指、距离上次按住大于预设秒、滑动距离小于预设值, 则可能是单击（如果后续双击间隔内没有开始手势）
-        // const stayTime = new Date().getTime() - this.lastTouchStartTime!
         const moveDistance = Math.sqrt(gestureState.dx * gestureState.dx + gestureState.dy * gestureState.dy);
         const { locationX, locationY, pageX, pageY } = evt.nativeEvent;
 
@@ -451,7 +421,7 @@ export default class ImageViewer extends React.Component<Props, State> {
             this.props.responderRelease(gestureState.vx, this.scale);
           }
 
-          this.panResponderReleaseResolve();
+          this.panResponderReleaseResolve(gestureState.vx, gestureState.vy);
         }
       },
       onPanResponderTerminate: () => {
@@ -467,7 +437,7 @@ export default class ImageViewer extends React.Component<Props, State> {
     this.animatedScale.setValue(1);
   };
 
-  public panResponderReleaseResolve = () => {
+  public panResponderReleaseResolve = (vx: number, vy: number) => {
     // 判断是否是 swipeDown
     if (this.props.enableSwipeDown && this.props.swipeDownThreshold) {
       if (this.swipeDownOffset > this.props.swipeDownThreshold) {
@@ -513,13 +483,33 @@ export default class ImageViewer extends React.Component<Props, State> {
       const verticalMax = (this.props.imageHeight * this.scale - this.props.cropHeight) / 2 / this.scale;
       if (this.positionY < -verticalMax) {
         this.positionY = -verticalMax;
+        Animated.timing(this.animatedPositionY, {
+          toValue: this.positionY,
+          duration: 100
+        }).start();
       } else if (this.positionY > verticalMax) {
         this.positionY = verticalMax;
+        Animated.timing(this.animatedPositionY, {
+          toValue: this.positionY,
+          duration: 100
+        }).start();
+      } else {
+        // Continue the drag with momentum
+        Animated.decay(this.animatedPositionY, {
+          velocity: vy / 2
+        }).start();
+
+        // If the momentum carries the image beyond the threshold, then reverse direction
+        this.listener = this.animatedPositionY.addListener(({ value }) => {
+          if (value < -verticalMax || value > verticalMax) {
+            this.animatedPositionY.removeListener(this.listener);
+            Animated.decay(this.animatedPositionY, {
+              velocity: -vy / 2,
+              deceleration: DECELERATION
+            }).start();
+          }
+        });
       }
-      Animated.timing(this.animatedPositionY, {
-        toValue: this.positionY,
-        duration: 100
-      }).start();
     }
 
     if (this.props.imageWidth * this.scale > this.props.cropWidth) {
@@ -527,13 +517,33 @@ export default class ImageViewer extends React.Component<Props, State> {
       const horizontalMax = (this.props.imageWidth * this.scale - this.props.cropWidth) / 2 / this.scale;
       if (this.positionX < -horizontalMax) {
         this.positionX = -horizontalMax;
+        Animated.timing(this.animatedPositionX, {
+          toValue: this.positionX,
+          duration: 100
+        }).start();
       } else if (this.positionX > horizontalMax) {
         this.positionX = horizontalMax;
+        Animated.timing(this.animatedPositionX, {
+          toValue: this.positionX,
+          duration: 100
+        }).start();
+      } else {
+        // Continue the drag with momentum
+        Animated.decay(this.animatedPositionX, {
+          velocity: vx / 2
+        }).start();
+
+        // If the momentum carries the image beyond the threshold, then reverse direction
+        this.listener = this.animatedPositionX.addListener(({ value }) => {
+          if (value < -horizontalMax || value > horizontalMax) {
+            this.animatedPositionX.removeListener(this.listener);
+            Animated.decay(this.animatedPositionX, {
+              velocity: -vx / 2,
+              deceleration: DECELERATION
+            }).start();
+          }
+        });
       }
-      Animated.timing(this.animatedPositionX, {
-        toValue: this.positionX,
-        duration: 100
-      }).start();
     }
 
     // 拖拽正常结束后,如果没有缩放,直接回到0,0点
